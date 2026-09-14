@@ -737,7 +737,7 @@ runner = web.AppRunner(app)
 await runner.setup()
 port = int(os.environ.get("PORT", 8080))
 await web.TCPSite(runner, "0.0.0.0", port).start()
-    await dp.start_polling(bot)
+ await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
