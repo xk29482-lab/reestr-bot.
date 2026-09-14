@@ -726,18 +726,17 @@ async def adm_view_exec(call: CallbackQuery):
     ])
     await call.message.edit_text(text, reply_markup=kb)
     await call.answer()
-
 async def main():
     init_db()
     await bot.delete_webhook(drop_pending_updates=True)
     print("Бот успешно запущен: мульти-предметный режим активен!")
     app = web.Application()
-app.router.add_get("/", lambda r: web.Response(text="OK"))
-runner = web.AppRunner(app)
-await runner.setup()
-port = int(os.environ.get("PORT", 8080))
-await web.TCPSite(runner, "0.0.0.0", port).start()
- await dp.start_polling(bot)
+    app.router.add_get("/", lambda r: web.Response(text="OK"))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    await web.TCPSite(runner, "0.0.0.0", port).start()
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
