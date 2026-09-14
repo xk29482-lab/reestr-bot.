@@ -1,3 +1,5 @@
+import os
+from aiohttp import web 
 import asyncio
 import logging
 import sqlite3
@@ -729,7 +731,13 @@ async def main():
     init_db()
     await bot.delete_webhook(drop_pending_updates=True)
     print("Бот успешно запущен: мульти-предметный режим активен!")
-    await dp.start_polling(bot)
+    app = web.Application()
+app.router.add_get("/", lambda r: web.Response(text="OK"))
+runner = web.AppRunner(app)
+await runner.setup()
+port = int(os.environ.get("PORT", 8080))
+await web.TCPSite(runner, "0.0.0.0", port).start()
+   await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
