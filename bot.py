@@ -3,6 +3,8 @@ from aiohttp import web
 import asyncio
 import logging
 import sqlite3
+import psycopg2
+from urllib.parse import urlparse
 import os
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -35,9 +37,43 @@ class AdminStates(StatesGroup):
     waiting_for_topics = State()
     waiting_for_custom_limit = State()
 
+def get_db_connection(*args, **kwargs):
+    database_url = os.getenv("DATABASE_URL")
+    if database_url:
+        return psycopg2.connect(database_url)
+    return sqlite3.connect(DB_NAME)
+
 def init_db():
-    with sqlite3.connect(DB_NAME) as conn:
-        cursor = conn.cursor()
+    database_url = os.getenv("DATABASE_URL")
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    if database_url:
+        # PostgreSQL (Supabase)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS lists (
+                id SERIAL PRIMARY KEY,
+                title TEXT NOT NULL
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS topics (
+                id SERIAL PRIMARY KEY,
+                list_id INTEGER REFERENCES lists(id) ON DELETE CASCADE,
+                title TEXT NOT NULL,
+                max_members INTEGER DEFAULT 1
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS topic_members (
+                id SERIAL PRIMARY KEY,
+                topic_id INTEGER REFERENCES topics(id) ON DELETE CASCADE,
+                user_id BIGINT NOT NULL,
+                user_name TEXT NOT NULL
+            )
+        """)
+    else:
+        # Локальный SQLite
         cursor.execute("PRAGMA foreign_keys = ON")
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS lists (
@@ -63,7 +99,10 @@ def init_db():
                 FOREIGN KEY (topic_id) REFERENCES topics (id) ON DELETE CASCADE
             )
         """)
-        conn.commit()
+    
+    conn.commit()
+    cursor.close()
+    conn.close()
 
 def get_all_lists():
     with sqlite3.connect(DB_NAME) as conn:
