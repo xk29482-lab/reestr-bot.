@@ -274,7 +274,7 @@ async def process_list_title(message: Message, state: FSMContext):
     await state.set_state(AdminStates.waiting_for_topics)
     await message.answer(
         f"Предмет <b>«{title}»</b> создан!\n\n"
-        "Теперь отправьте список тем **одним сообщением**, где каждая тема с новой строки.\n"
+        "Теперь отправьте список тем <b>одним сообщением</b>, где каждая тема с новой строки.\n"
         "<i>(Если на тему нужно больше 1 человека, укажите в конце темы цифру в скобках, например: Тема доклада (2))</i>",
         parse_mode="HTML"
     )
@@ -413,14 +413,16 @@ async def cb_leave_topic(callback: CallbackQuery):
 async def cb_my_topics(callback: CallbackQuery):
     topics = get_user_topics(callback.from_user.id)
     if not topics:
-        await callback.message.edit_text("У вас пока нет выбранных тем.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu")]]))
+        back_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu")]])
+        await callback.message.edit_text("У вас пока нет выбранных тем.", reply_markup=back_kb)
         return
     
     text = "<b>Ваши выбранные темы:</b>\n\n"
     for _, t_title, l_title in topics:
         text += f"• <b>{l_title}</b>: {t_title}\n"
 
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb := [[InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu")]]))
+    back_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu")]])
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=back_kb)
 
 # --- ВЫГРУЗКА EXCEL ---
 @router.callback_query(F.data == "download_excel")
