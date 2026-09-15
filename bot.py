@@ -3,13 +3,12 @@ import io
 import logging
 import asyncio
 import psycopg2
-from urllib.parse import urlparse
 from aiohttp import web
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.styles import Font, PatternFill, Alignment
 
 from aiogram import Bot, Dispatcher, F, Router
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -37,7 +36,6 @@ dp.include_router(router)
 class AdminStates(StatesGroup):
     waiting_for_list_title = State()
     waiting_for_topics = State()
-    waiting_for_custom_limit = State()
 
 # --- РАБОТА С БАЗОЙ ДАННЫХ ---
 def get_db_connection():
@@ -52,9 +50,7 @@ def query_placeholder():
 def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
-    
     if DATABASE_URL:
-        # PostgreSQL
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS lists (
                 id SERIAL PRIMARY KEY,
@@ -78,7 +74,6 @@ def init_db():
             )
         """)
     else:
-        # SQLite
         cursor.execute("PRAGMA foreign_keys = ON")
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS lists (
@@ -104,7 +99,6 @@ def init_db():
                 FOREIGN KEY (topic_id) REFERENCES topics (id) ON DELETE CASCADE
             )
         """)
-    
     conn.commit()
     cursor.close()
     conn.close()
@@ -143,7 +137,6 @@ def add_member(topic_id, user_id, user_name):
     conn = get_db_connection()
     cursor = conn.cursor()
     p = query_placeholder()
-    # Проверка лимита
     cursor.execute(f"SELECT max_members FROM topics WHERE id = {p}", (topic_id,))
     res = cursor.fetchone()
     if not res:
@@ -234,20 +227,112 @@ def get_main_menu(is_admin=False):
         kb.append([InlineKeyboardButton(text="⚙️ Меню старосты", callback_data="admin_menu")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
-# --- ХЕНДЛЕРЫ ---
+def get_admin_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Создать список тем", callback_data="admin_create_list")],
+        [InlineKeyboardButton(text="🗑 Удалить список тем", callback_data="admin_delete_list")],
+        [InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu")]
+    ])
+
+# --- ОБЩИЕ ХЕНДЛЕРЫ ---
 @router.message(CommandStart())
-async def cmd_start(message: Message):
-    is_admin = (message.from_user.id == ADMIN_ID) or (ADMIN_ID == 0)
+async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
+    is_admin = (ADMIN_ID == 0) or (message.from_user.id == ADMIN_ID)
     await message.answer(
         f"👋 Привет, {message.from_user.first_name}!\n\nГлавное меню каталога тем:",
         reply_markup=get_main_menu(is_admin)
     )
 
+@router.callback_query(F.data == "main_menu")
+async def cb_main_menu(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    is_admin = (ADMIN_ID == 0) or (callback.from_user.id == ADMIN_ID)
+    await callback.message.edit_text("Главное меню каталога тем:", reply_markup=get_main_menu(is_admin))
+
+# --- ХЕНДЛЕРЫ МЕНЮ СТАРОСТЫ ---
+@router.callback_query(F.data == "admin_menu")
+async def cb_admin_menu(callback: CallbackQuery):
+    if ADMIN_ID != 0 and callback.from_user.id != ADMIN_ID:
+        await callback.answer("У вас нет прав старосты.", show_alert=True)
+        return
+    await callback.message.edit_text("⚙️ <b>Панель старосты:</b>\nВыберите действие:", parse_mode="HTML", reply_markup=get_admin_menu())
+
+@router.callback_query(F.data == "admin_create_list")
+async def cb_admin_create_list(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminStates.waiting_for_list_title)
+    await callback.message.edit_text(
+        "✏️ Введите название предмета или реестра (например: <i>Экономическая теория</i>):",
+        parse_mode="HTML"
+    )
+
+@router.message(AdminStates.waiting_for_list_title)
+async def process_list_title(message: Message, state: FSMContext):
+    title = message.text.strip()
+    list_id = create_list(title)
+    await state.update_data(list_id=list_id, list_title=title)
+    await state.set_state(AdminStates.waiting_for_topics)
+    await message.answer(
+        f"Предмет <b>«{title}»</b> создан!\n\n"
+        "Теперь отправьте список тем **одним сообщением**, где каждая тема с новой строки.\n"
+        "<i>(Если на тему нужно больше 1 человека, укажите в конце темы цифру в скобках, например: Тема доклада (2))</i>",
+        parse_mode="HTML"
+    )
+
+@router.message(AdminStates.waiting_for_topics)
+async def process_topics(message: Message, state: FSMContext):
+    data = await state.get_data()
+    list_id = data.get("list_id")
+    lines = [line.strip() for line in message.text.split("\n") if line.strip()]
+
+    count = 0
+    for line in lines:
+        max_m = 1
+        title = line
+        if line.endswith(")") and "(" in line:
+            try:
+                num = line.rsplit("(", 1)[1].rstrip(")")
+                max_m = int(num)
+                title = line.rsplit("(", 1)[0].strip()
+            except ValueError:
+                pass
+        create_topic(list_id, title, max_m)
+        count += 1
+
+    await state.clear()
+    is_admin = (ADMIN_ID == 0) or (message.from_user.id == ADMIN_ID)
+    await message.answer(
+        f"✅ Успешно добавлено {count} тем к предмету <b>«{data.get('list_title')}»</b>!",
+        parse_mode="HTML",
+        reply_markup=get_main_menu(is_admin)
+    )
+
+@router.callback_query(F.data == "admin_delete_list")
+async def cb_admin_delete_list(callback: CallbackQuery):
+    lists = get_all_lists()
+    if not lists:
+        await callback.message.edit_text("Нет доступных списков для удаления.", reply_markup=get_admin_menu())
+        return
+    kb = [[InlineKeyboardButton(text=f"❌ {t}", callback_data=f"del_list_{lid}")] for lid, t in lists]
+    kb.append([InlineKeyboardButton(text="◀️ Назад", callback_data="admin_menu")])
+    await callback.message.edit_text("Выберите предмет, который хотите полностью удалить:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@router.callback_query(F.data.startswith("del_list_"))
+async def cb_confirm_del_list(callback: CallbackQuery):
+    list_id = int(callback.data.split("_")[2])
+    delete_list(list_id)
+    await callback.answer("Предмет и темы удалены!")
+    await cb_admin_delete_list(callback)
+
+# --- ПРОСМОТР И ЗАПИСЬ НА ТЕМЫ ---
 @router.callback_query(F.data == "view_lists")
 async def cb_view_lists(callback: CallbackQuery):
     lists = get_all_lists()
     if not lists:
-        await callback.message.edit_text("Пока нет доступных списков тем.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="main_menu")]]))
+        await callback.message.edit_text(
+            "Пока нет доступных предметов.\nСтароста может создать их в меню старосты.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="main_menu")]])
+        )
         return
     kb = [[InlineKeyboardButton(text=t, callback_data=f"open_list_{lid}")] for lid, t in lists]
     kb.append([InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu")])
@@ -335,12 +420,7 @@ async def cb_my_topics(callback: CallbackQuery):
     for _, t_title, l_title in topics:
         text += f"• <b>{l_title}</b>: {t_title}\n"
 
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu")]]))
-
-@router.callback_query(F.data == "main_menu")
-async def cb_main_menu(callback: CallbackQuery):
-    is_admin = (callback.from_user.id == ADMIN_ID) or (ADMIN_ID == 0)
-    await callback.message.edit_text("Главное меню каталога тем:", reply_markup=get_main_menu(is_admin))
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb := [[InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu")]]))
 
 # --- ВЫГРУЗКА EXCEL ---
 @router.callback_query(F.data == "download_excel")
