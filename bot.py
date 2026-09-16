@@ -37,6 +37,9 @@ class AdminStates(StatesGroup):
     waiting_for_list_title = State()
     waiting_for_topics = State()
 
+class StudentStates(StatesGroup):
+    waiting_for_custom_topic = State()
+
 # --- РАБОТА С БАЗОЙ ДАННЫХ ---
 def get_db_connection():
     if DATABASE_URL:
@@ -147,7 +150,7 @@ def get_user_topic_in_list(list_id, user_id):
     row = cursor.fetchone()
     cursor.close()
     conn.close()
-    return row  # вернет (topic_id, title) или None
+    return row
 
 def add_member(topic_id, user_id, user_name):
     conn = get_db_connection()
@@ -235,10 +238,16 @@ def create_topic(list_id, title, max_members=1):
     conn = get_db_connection()
     cursor = conn.cursor()
     p = query_placeholder()
-    cursor.execute(f"INSERT INTO topics (list_id, title, max_members) VALUES ({p}, {p}, {p})", (list_id, title, max_members))
+    if DATABASE_URL:
+        cursor.execute(f"INSERT INTO topics (list_id, title, max_members) VALUES ({p}, {p}, {p}) RETURNING id", (list_id, title, max_members))
+        topic_id = cursor.fetchone()[0]
+    else:
+        cursor.execute(f"INSERT INTO topics (list_id, title, max_members) VALUES ({p}, {p}, {p})", (list_id, title, max_members))
+        topic_id = cursor.lastrowid
     conn.commit()
     cursor.close()
     conn.close()
+    return topic_id
 
 def delete_list(list_id):
     conn = get_db_connection()
@@ -359,7 +368,8 @@ async def cb_confirm_del_list(callback: CallbackQuery):
 
 # --- ПРОСМОТР И ЗАПИСЬ НА ТЕМЫ ---
 @router.callback_query(F.data == "view_lists")
-async def cb_view_lists(callback: CallbackQuery):
+async def cb_view_lists(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
     lists = get_all_lists()
     if not lists:
         back_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="main_menu")]])
@@ -373,13 +383,10 @@ async def cb_view_lists(callback: CallbackQuery):
     await callback.message.edit_text("Выберите предмет:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 @router.callback_query(F.data.startswith("open_list_"))
-async def cb_open_list(callback: CallbackQuery):
+async def cb_open_list(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
     list_id = int(callback.data.split("_")[2])
     topics = get_topics(list_id)
-    if not topics:
-        back_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="view_lists")]])
-        await callback.message.edit_text("В этом списке пока нет тем.", reply_markup=back_kb)
-        return
     
     # Проверяем, выбрал ли студент уже какую-то тему в этом предмете
     user_chosen = get_user_topic_in_list(list_id, callback.from_user.id)
@@ -399,14 +406,77 @@ async def cb_open_list(callback: CallbackQuery):
             
         btn_text = f"{title} — {status}"
         kb.append([InlineKeyboardButton(text=btn_text, callback_data=f"topic_{tid}")])
-        
+    
+    # Если студент ещё не выбрал тему, даём возможность предложить свою
+    if not user_chosen:
+        kb.append([InlineKeyboardButton(text="💡 Предложить свою тему («Другое»)", callback_data=f"custom_topic_{list_id}")])
+
     kb.append([InlineKeyboardButton(text="◀️ К предметам", callback_data="view_lists")])
     
-    header_text = "Выберите тему для записи:"
+    header_text = "Выберите тему для записи или предложите свою:"
     if user_chosen:
         header_text = f"⚠️ <b>Вы уже выбрали тему в этом предмете:</b>\n«{user_chosen[1]}»\n\nЧтобы выбрать другую, сначала откажитесь от текущей."
 
     await callback.message.edit_text(header_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+# --- ПРЕДЛОЖИТЬ СВОЮ ТЕМУ («ДРУГОЕ») ---
+@router.callback_query(F.data.startswith("custom_topic_"))
+async def cb_custom_topic_start(callback: CallbackQuery, state: FSMContext):
+    list_id = int(callback.data.split("_")[2])
+    
+    # Проверка, не записан ли уже студент
+    user_chosen = get_user_topic_in_list(list_id, callback.from_user.id)
+    if user_chosen:
+        await callback.answer("Вы уже записаны на тему в этом предмете!", show_alert=True)
+        return
+
+    await state.update_data(custom_list_id=list_id)
+    await state.set_state(StudentStates.waiting_for_custom_topic)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Отмена", callback_data=f"open_list_{list_id}")]])
+    await callback.message.edit_text(
+        "💡 <b>Предложить свою тему</b>\n\n"
+        "Напишите и отправьте точное название темы в чат.\n"
+        "Она автоматически появится в общем списке и закрепится за вами как занятая.",
+        parse_mode="HTML",
+        reply_markup=kb
+    )
+
+@router.message(StudentStates.waiting_for_custom_topic)
+async def process_custom_topic_text(message: Message, state: FSMContext):
+    topic_title = message.text.strip()
+    if not topic_title:
+        await message.answer("Пожалуйста, напишите непустое название темы.")
+        return
+
+    data = await state.get_data()
+    list_id = data.get("custom_list_id")
+
+    # Повторная проверка перед добавлением
+    user_chosen = get_user_topic_in_list(list_id, message.from_user.id)
+    if user_chosen:
+        await state.clear()
+        await message.answer("Вы уже записаны на тему в этом предмете.")
+        return
+
+    # Создаем тему (лимит 1 человек)
+    topic_id = create_topic(list_id, topic_title, max_members=1)
+    # Сразу записываем студента
+    name = message.from_user.full_name
+    add_member(topic_id, message.from_user.id, name)
+
+    await state.clear()
+    is_admin = (ADMIN_ID == 0) or (message.from_user.id == ADMIN_ID)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 Вернуться к списку тем", callback_data=f"open_list_{list_id}")],
+        [InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu")]
+    ])
+    await message.answer(
+        f"✅ Ваша тема <b>«{topic_title}»</b> успешно добавлена в список и закреплена за вами!",
+        parse_mode="HTML",
+        reply_markup=kb
+    )
 
 @router.callback_query(F.data.startswith("topic_"))
 async def cb_topic_details(callback: CallbackQuery):
@@ -436,18 +506,14 @@ async def cb_topic_details(callback: CallbackQuery):
 
     user_ids = [m[0] for m in members]
     is_user_in_this_topic = callback.from_user.id in user_ids
-    
-    # Проверяем, записан ли студент вообще в этом предмете
     user_topic_in_list = get_user_topic_in_list(list_id, callback.from_user.id)
 
     kb = []
     if is_user_in_this_topic:
         kb.append([InlineKeyboardButton(text="❌ Отказаться от темы", callback_data=f"leave_{topic_id}")])
     elif user_topic_in_list:
-        # Студент уже занял ДРУГУЮ тему в этом предмете -> КНОПКИ ЗАПИСИ НЕТ
         text += f"\n⚠️ <i>Вы уже записаны на тему «{user_topic_in_list[1]}». По правилам можно выбрать только 1 тему.</i>"
     elif cur_m < max_m:
-        # Студент свободен и места есть -> показываем кнопку записи
         kb.append([InlineKeyboardButton(text="✅ Записаться на тему", callback_data=f"take_{topic_id}")])
 
     kb.append([InlineKeyboardButton(text="◀️ Назад к списку", callback_data=f"open_list_{list_id}")])
