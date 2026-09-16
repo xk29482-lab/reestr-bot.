@@ -25,7 +25,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 PORT = int(os.getenv("PORT", "8080"))
-PAGE_SIZE = 8  # Количество тем на одной странице
+PAGE_SIZE = 8
 
 logging.basicConfig(level=logging.INFO)
 
@@ -38,6 +38,9 @@ dp.include_router(router)
 class AdminStates(StatesGroup):
     waiting_for_list_title = State()
     waiting_for_topics = State()
+    waiting_for_append_topics = State()
+    waiting_for_new_topic_title = State()
+    waiting_for_new_max_members = State()
 
 class StudentStates(StatesGroup):
     waiting_for_custom_topic = State()
@@ -119,6 +122,16 @@ def get_all_lists():
     conn.close()
     return rows
 
+def get_list_by_id(list_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    p = query_placeholder()
+    cursor.execute(f"SELECT id, title FROM lists WHERE id = {p}", (list_id,))
+    row = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return row
+
 def get_topics(list_id, search_query=None):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -134,6 +147,16 @@ def get_topics(list_id, search_query=None):
     cursor.close()
     conn.close()
     return rows
+
+def get_topic_by_id(topic_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    p = query_placeholder()
+    cursor.execute(f"SELECT id, list_id, title, max_members FROM topics WHERE id = {p}", (topic_id,))
+    row = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return row
 
 def get_members(topic_id):
     conn = get_db_connection()
@@ -207,6 +230,15 @@ def remove_member(topic_id, user_id):
     cursor.close()
     conn.close()
 
+def clear_topic_members(topic_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    p = query_placeholder()
+    cursor.execute(f"DELETE FROM topic_members WHERE topic_id = {p}", (topic_id,))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
 def get_user_topics(user_id):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -253,8 +285,34 @@ def create_topic(list_id, title, max_members=1):
     conn.close()
     return topic_id
 
+def update_topic_title(topic_id, new_title):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    p = query_placeholder()
+    cursor.execute(f"UPDATE topics SET title = {p} WHERE id = {p}", (new_title, topic_id))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+def update_topic_max_members(topic_id, new_max):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    p = query_placeholder()
+    cursor.execute(f"UPDATE topics SET max_members = {p} WHERE id = {p}", (new_max, topic_id))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+def delete_topic(topic_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    p = query_placeholder()
+    cursor.execute(f"DELETE FROM topics WHERE id = {p}", (topic_id,))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
 def batch_create_topics(topics_data):
-    """Массовая вставка тем в базу за один запрос"""
     conn = get_db_connection()
     cursor = conn.cursor()
     p = query_placeholder()
@@ -273,7 +331,7 @@ def delete_list(list_id):
     cursor.close()
     conn.close()
 
-# --- ГЛАВНЫЕ МЕНЮ ---
+# --- МЕНЮ И КЛАВИАТУРЫ ---
 def get_main_menu(is_admin=False):
     kb = [
         [InlineKeyboardButton(text="📋 Выбрать предмет и тему", callback_data="view_lists")],
@@ -286,12 +344,14 @@ def get_main_menu(is_admin=False):
 
 def get_admin_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Создать список тем", callback_data="admin_create_list")],
-        [InlineKeyboardButton(text="🗑 Удалить список тем", callback_data="admin_delete_list")],
+        [InlineKeyboardButton(text="➕ Создать новый предмет", callback_data="admin_create_list")],
+        [InlineKeyboardButton(text="📥 Добавить темы в предмет", callback_data="admin_append_topics_choose")],
+        [InlineKeyboardButton(text="✏️ Редактировать темы", callback_data="admin_edit_topics_choose")],
+        [InlineKeyboardButton(text="🗑 Удалить предмет со всеми темами", callback_data="admin_delete_list")],
         [InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu")]
     ])
 
-# Генератор клавиатуры со страницами (Пагинация)
+# Генератор страниц списка для студентов
 def build_topics_page_keyboard(list_id, topics, user_id, page=0, is_search=False):
     total_topics = len(topics)
     total_pages = max(1, math.ceil(total_topics / PAGE_SIZE))
@@ -314,12 +374,10 @@ def build_topics_page_keyboard(list_id, topics, user_id, page=0, is_search=False
         else:
             status = f"🟢 ({cur_m}/{max_m})"
 
-        # Обрезаем длинный заголовок, чтобы уместился в кнопке
         display_title = title if len(title) <= 35 else title[:32] + "..."
         btn_text = f"{display_title} — {status}"
         kb.append([InlineKeyboardButton(text=btn_text, callback_data=f"topic_{tid}_{page}")])
 
-    # Кнопки навигации страниц
     nav_row = []
     if page > 0:
         nav_row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"page_{list_id}_{page - 1}"))
@@ -331,7 +389,6 @@ def build_topics_page_keyboard(list_id, topics, user_id, page=0, is_search=False
     if nav_row:
         kb.append(nav_row)
 
-    # Дополнительные инструменты
     bottom_row = []
     if is_search:
         bottom_row.append(InlineKeyboardButton(text="🔄 Сбросить поиск", callback_data=f"open_list_{list_id}_0"))
@@ -348,7 +405,39 @@ def build_topics_page_keyboard(list_id, topics, user_id, page=0, is_search=False
     kb.append([InlineKeyboardButton(text="◀️ К списку предметов", callback_data="view_lists")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
-# --- ОБЩИЕ КОМАНДЫ ---
+# Генератор страниц тем для панели старосты
+def build_admin_topics_page_keyboard(list_id, topics, page=0):
+    total_topics = len(topics)
+    total_pages = max(1, math.ceil(total_topics / PAGE_SIZE))
+    page = max(0, min(page, total_pages - 1))
+
+    start_idx = page * PAGE_SIZE
+    end_idx = start_idx + PAGE_SIZE
+    current_page_topics = topics[start_idx:end_idx]
+
+    kb = []
+    for tid, title, max_m in current_page_topics:
+        members = get_members(tid)
+        cur_m = len(members)
+        display_title = title if len(title) <= 32 else title[:29] + "..."
+        btn_text = f"✏️ {display_title} ({cur_m}/{max_m})"
+        kb.append([InlineKeyboardButton(text=btn_text, callback_data=f"admin_topic_{tid}_{page}")])
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_page_{list_id}_{page - 1}"))
+    if total_pages > 1:
+        nav_row.append(InlineKeyboardButton(text=f"Стр. {page + 1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"admin_page_{list_id}_{page + 1}"))
+
+    if nav_row:
+        kb.append(nav_row)
+
+    kb.append([InlineKeyboardButton(text="◀️ К выбору предметов", callback_data="admin_edit_topics_choose")])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+# --- БАЗОВЫЕ ХЕНДЛЕРЫ ---
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
@@ -368,14 +457,16 @@ async def cb_main_menu(callback: CallbackQuery, state: FSMContext):
 async def cb_noop(callback: CallbackQuery):
     await callback.answer()
 
-# --- МЕНЮ СТАРОСТЫ ---
+# --- МЕНЮ СТАРОСТЫ (АДМИН) ---
 @router.callback_query(F.data == "admin_menu")
-async def cb_admin_menu(callback: CallbackQuery):
+async def cb_admin_menu(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
     if ADMIN_ID != 0 and callback.from_user.id != ADMIN_ID:
         await callback.answer("У вас нет прав старосты.", show_alert=True)
         return
     await callback.message.edit_text("⚙️ <b>Панель старосты:</b>\nВыберите действие:", parse_mode="HTML", reply_markup=get_admin_menu())
 
+# Создание нового предмета
 @router.callback_query(F.data == "admin_create_list")
 async def cb_admin_create_list(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AdminStates.waiting_for_list_title)
@@ -392,8 +483,8 @@ async def process_list_title(message: Message, state: FSMContext):
     await state.set_state(AdminStates.waiting_for_topics)
     await message.answer(
         f"Предмет <b>«{title}»</b> создан!\n\n"
-        "Отправьте список тем сообщением (каждая с новой строки).\n"
-        "<i>Можно отправлять большие списки на десятки тем за раз.</i>",
+        "Отправьте список тем сообщением (каждая тема с новой строки).\n"
+        "<i>Если на тему нужно несколько человек, укажите в конце цифру в скобках, например: Тема доклада (2)</i>",
         parse_mode="HTML"
     )
 
@@ -427,6 +518,264 @@ async def process_topics(message: Message, state: FSMContext):
         reply_markup=get_main_menu(is_admin)
     )
 
+# Добавление тем в существующий предмет
+@router.callback_query(F.data == "admin_append_topics_choose")
+async def cb_admin_append_topics_choose(callback: CallbackQuery):
+    lists = get_all_lists()
+    if not lists:
+        await callback.message.edit_text("Нет созданных предметов.", reply_markup=get_admin_menu())
+        return
+    kb = [[InlineKeyboardButton(text=t, callback_data=f"admin_append_to_{lid}")] for lid, t in lists]
+    kb.append([InlineKeyboardButton(text="◀️ Назад", callback_data="admin_menu")])
+    await callback.message.edit_text("Выберите предмет, в который нужно добавить темы:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@router.callback_query(F.data.startswith("admin_append_to_"))
+async def cb_admin_append_to(callback: CallbackQuery, state: FSMContext):
+    list_id = int(callback.data.split("_")[3])
+    item = get_list_by_id(list_id)
+    await state.update_data(append_list_id=list_id, append_list_title=item[1])
+    await state.set_state(AdminStates.waiting_for_append_topics)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Отмена", callback_data="admin_menu")]])
+    await callback.message.edit_text(
+        f"📥 Отправьте новые темы для предмета <b>«{item[1]}»</b> (каждая тема с новой строки):",
+        parse_mode="HTML",
+        reply_markup=kb
+    )
+
+@router.message(AdminStates.waiting_for_append_topics)
+async def process_append_topics(message: Message, state: FSMContext):
+    data = await state.get_data()
+    list_id = data.get("append_list_id")
+    lines = [line.strip() for line in message.text.split("\n") if line.strip()]
+
+    topics_to_insert = []
+    for line in lines:
+        max_m = 1
+        title = line
+        if line.endswith(")") and "(" in line:
+            try:
+                num = line.rsplit("(", 1)[1].rstrip(")")
+                max_m = int(num)
+                title = line.rsplit("(", 1)[0].strip()
+            except ValueError:
+                pass
+        topics_to_insert.append((list_id, title, max_m))
+
+    if topics_to_insert:
+        batch_create_topics(topics_to_insert)
+
+    await state.clear()
+    is_admin = (ADMIN_ID == 0) or (message.from_user.id == ADMIN_ID)
+    await message.answer(
+        f"✅ Добавлено {len(topics_to_insert)} новых тем к предмету <b>«{data.get('append_list_title')}»</b>!",
+        parse_mode="HTML",
+        reply_markup=get_main_menu(is_admin)
+    )
+
+# Редактирование тем (Выбор предмета -> Выбор темы -> Меню темы)
+@router.callback_query(F.data == "admin_edit_topics_choose")
+async def cb_admin_edit_topics_choose(callback: CallbackQuery):
+    lists = get_all_lists()
+    if not lists:
+        await callback.message.edit_text("Нет созданных предметов.", reply_markup=get_admin_menu())
+        return
+    kb = [[InlineKeyboardButton(text=t, callback_data=f"admin_open_edit_list_{lid}_0")] for lid, t in lists]
+    kb.append([InlineKeyboardButton(text="◀️ Назад", callback_data="admin_menu")])
+    await callback.message.edit_text("Выберите предмет для редактирования тем:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@router.callback_query(F.data.startswith("admin_open_edit_list_"))
+async def cb_admin_open_edit_list(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    parts = callback.data.split("_")
+    list_id = int(parts[4])
+    page = int(parts[5]) if len(parts) > 5 else 0
+
+    topics = get_topics(list_id)
+    item = get_list_by_id(list_id)
+    if not topics:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="admin_edit_topics_choose")]])
+        await callback.message.edit_text(f"В предмете «{item[1]}» пока нет тем.", reply_markup=kb)
+        return
+
+    kb = build_admin_topics_page_keyboard(list_id, topics, page=page)
+    await callback.message.edit_text(
+        f"✏️ <b>Редактирование тем: «{item[1]}»</b>\nВыберите тему для изменения:",
+        parse_mode="HTML",
+        reply_markup=kb
+    )
+
+@router.callback_query(F.data.startswith("admin_page_"))
+async def cb_admin_page(callback: CallbackQuery):
+    parts = callback.data.split("_")
+    list_id = int(parts[2])
+    page = int(parts[3])
+
+    topics = get_topics(list_id)
+    item = get_list_by_id(list_id)
+    kb = build_admin_topics_page_keyboard(list_id, topics, page=page)
+    await callback.message.edit_text(
+        f"✏️ <b>Редактирование тем: «{item[1]}»</b>\nВыберите тему для изменения:",
+        parse_mode="HTML",
+        reply_markup=kb
+    )
+
+# Детальное меню редактирования темы
+@router.callback_query(F.data.startswith("admin_topic_"))
+async def cb_admin_topic_detail(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    parts = callback.data.split("_")
+    topic_id = int(parts[2])
+    page = int(parts[3]) if len(parts) > 3 else 0
+
+    topic = get_topic_by_id(topic_id)
+    if not topic:
+        await callback.answer("Тема не найдена")
+        return
+
+    _, list_id, title, max_m = topic
+    members = get_members(topic_id)
+
+    text = f"⚙️ <b>Управление темой:</b>\n\n<b>Название:</b> {title}\n<b>Лимит мест:</b> {len(members)}/{max_m}\n\n<b>Записаны:</b>\n"
+    if members:
+        for _, name in members:
+            text += f"• {name}\n"
+    else:
+        text += "— Свободно\n"
+
+    kb = [
+        [InlineKeyboardButton(text="✏️ Изменить название", callback_data=f"edit_title_{topic_id}_{page}")],
+        [InlineKeyboardButton(text="👥 Изменить лимит мест", callback_data=f"edit_limit_{topic_id}_{page}")],
+        [InlineKeyboardButton(text="🔄 Снять всех студентов", callback_data=f"clear_mem_{topic_id}_{page}")],
+        [InlineKeyboardButton(text="🗑 Удалить тему полностью", callback_data=f"del_topic_{topic_id}_{page}")],
+        [InlineKeyboardButton(text="◀️ Назад к темам", callback_data=f"admin_open_edit_list_{list_id}_{page}")]
+    ]
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+# Редактирование названия темы
+@router.callback_query(F.data.startswith("edit_title_"))
+async def cb_edit_title(callback: CallbackQuery, state: FSMContext):
+    parts = callback.data.split("_")
+    topic_id = int(parts[2])
+    page = int(parts[3])
+
+    await state.update_data(edit_topic_id=topic_id, edit_topic_page=page)
+    await state.set_state(AdminStates.waiting_for_new_topic_title)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Отмена", callback_data=f"admin_topic_{topic_id}_{page}")]])
+    await callback.message.edit_text("Отправьте новое название темы в чат:", reply_markup=kb)
+
+@router.message(AdminStates.waiting_for_new_topic_title)
+async def process_new_topic_title(message: Message, state: FSMContext):
+    new_title = message.text.strip()
+    data = await state.get_data()
+    topic_id = data.get("edit_topic_id")
+    page = data.get("edit_topic_page")
+
+    update_topic_title(topic_id, new_title)
+    await state.clear()
+    await message.answer("✅ Название темы обновлено!")
+
+    # Возвращаемся в карточку темы
+    topic = get_topic_by_id(topic_id)
+    _, list_id, title, max_m = topic
+    members = get_members(topic_id)
+    text = f"⚙️ <b>Управление темой:</b>\n\n<b>Название:</b> {title}\n<b>Лимит мест:</b> {len(members)}/{max_m}\n\n<b>Записаны:</b>\n"
+    for _, name in members:
+        text += f"• {name}\n"
+    if not members:
+        text += "— Свободно\n"
+
+    kb = [
+        [InlineKeyboardButton(text="✏️ Изменить название", callback_data=f"edit_title_{topic_id}_{page}")],
+        [InlineKeyboardButton(text="👥 Изменить лимит мест", callback_data=f"edit_limit_{topic_id}_{page}")],
+        [InlineKeyboardButton(text="🔄 Снять всех студентов", callback_data=f"clear_mem_{topic_id}_{page}")],
+        [InlineKeyboardButton(text="🗑 Удалить тему полностью", callback_data=f"del_topic_{topic_id}_{page}")],
+        [InlineKeyboardButton(text="◀️ Назад к темам", callback_data=f"admin_open_edit_list_{list_id}_{page}")]
+    ]
+    await message.answer(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+# Редактирование лимита мест
+@router.callback_query(F.data.startswith("edit_limit_"))
+async def cb_edit_limit(callback: CallbackQuery, state: FSMContext):
+    parts = callback.data.split("_")
+    topic_id = int(parts[2])
+    page = int(parts[3])
+
+    await state.update_data(edit_topic_id=topic_id, edit_topic_page=page)
+    await state.set_state(AdminStates.waiting_for_new_max_members)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Отмена", callback_data=f"admin_topic_{topic_id}_{page}")]])
+    await callback.message.edit_text("Отправьте новое максимальное количество мест (число от 1 до 10):", reply_markup=kb)
+
+@router.message(AdminStates.waiting_for_new_max_members)
+async def process_new_max_members(message: Message, state: FSMContext):
+    data = await state.get_data()
+    topic_id = data.get("edit_topic_id")
+    page = data.get("edit_topic_page")
+
+    try:
+        new_max = int(message.text.strip())
+        if new_max < 1:
+            raise ValueError
+    except ValueError:
+        await message.answer("Пожалуйста, введите корректное число от 1 до 10.")
+        return
+
+    update_topic_max_members(topic_id, new_max)
+    await state.clear()
+    await message.answer(f"✅ Лимит мест изменен на {new_max}!")
+
+    topic = get_topic_by_id(topic_id)
+    _, list_id, title, max_m = topic
+    members = get_members(topic_id)
+    text = f"⚙️ <b>Управление темой:</b>\n\n<b>Название:</b> {title}\n<b>Лимит мест:</b> {len(members)}/{max_m}\n\n<b>Записаны:</b>\n"
+    for _, name in members:
+        text += f"• {name}\n"
+    if not members:
+        text += "— Свободно\n"
+
+    kb = [
+        [InlineKeyboardButton(text="✏️ Изменить название", callback_data=f"edit_title_{topic_id}_{page}")],
+        [InlineKeyboardButton(text="👥 Изменить лимит мест", callback_data=f"edit_limit_{topic_id}_{page}")],
+        [InlineKeyboardButton(text="🔄 Снять всех студентов", callback_data=f"clear_mem_{topic_id}_{page}")],
+        [InlineKeyboardButton(text="🗑 Удалить тему полностью", callback_data=f"del_topic_{topic_id}_{page}")],
+        [InlineKeyboardButton(text="◀️ Назад к темам", callback_data=f"admin_open_edit_list_{list_id}_{page}")]
+    ]
+    await message.answer(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+# Снять всех с темы
+@router.callback_query(F.data.startswith("clear_mem_"))
+async def cb_clear_mem(callback: CallbackQuery):
+    parts = callback.data.split("_")
+    topic_id = int(parts[2])
+    page = int(parts[3])
+    clear_topic_members(topic_id)
+    await callback.answer("Все студенты сняты с темы!")
+    await cb_admin_topic_detail(callback, None)
+
+# Удаление отдельной темы
+@router.callback_query(F.data.startswith("del_topic_"))
+async def cb_del_topic(callback: CallbackQuery):
+    parts = callback.data.split("_")
+    topic_id = int(parts[2])
+    page = int(parts[3])
+
+    topic = get_topic_by_id(topic_id)
+    list_id = topic[1]
+    delete_topic(topic_id)
+    await callback.answer("Тема удалена!")
+
+    # Возврат к списку тем
+    topics = get_topics(list_id)
+    item = get_list_by_id(list_id)
+    kb = build_admin_topics_page_keyboard(list_id, topics, page=page)
+    await callback.message.edit_text(
+        f"✏️ <b>Редактирование тем: «{item[1]}»</b>\nТема была удалена. Выберите действие:",
+        parse_mode="HTML",
+        reply_markup=kb
+    )
+
+# Удаление целого предмета
 @router.callback_query(F.data == "admin_delete_list")
 async def cb_admin_delete_list(callback: CallbackQuery):
     lists = get_all_lists()
@@ -435,16 +784,16 @@ async def cb_admin_delete_list(callback: CallbackQuery):
         return
     kb = [[InlineKeyboardButton(text=f"❌ {t}", callback_data=f"del_list_{lid}")] for lid, t in lists]
     kb.append([InlineKeyboardButton(text="◀️ Назад", callback_data="admin_menu")])
-    await callback.message.edit_text("Выберите предмет для удаления:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await callback.message.edit_text("Выберите предмет, который хотите полностью удалить:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 @router.callback_query(F.data.startswith("del_list_"))
 async def cb_confirm_del_list(callback: CallbackQuery):
     list_id = int(callback.data.split("_")[2])
     delete_list(list_id)
-    await callback.answer("Предмет и темы удалены!")
+    await callback.answer("Предмет и все темы удалены!")
     await cb_admin_delete_list(callback)
 
-# --- ПРОСМОТР ТЕМ И ПАГИНАЦИЯ ---
+# --- СТУДЕНЧЕСКИЙ КАТАЛОГ И ЗАПИСЬ ---
 @router.callback_query(F.data == "view_lists")
 async def cb_view_lists(callback: CallbackQuery, state: FSMContext):
     await state.clear()
@@ -466,8 +815,11 @@ async def cb_open_list(callback: CallbackQuery, state: FSMContext):
 
     topics = get_topics(list_id)
     if not topics:
-        back_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="view_lists")]])
-        await callback.message.edit_text("В этом предмете пока нет тем.", reply_markup=back_kb)
+        back_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💡 Предложить свою тему («Другое»)", callback_data=f"custom_topic_{list_id}")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="view_lists")]
+        ])
+        await callback.message.edit_text("В этом предмете пока нет заготовленных тем. Вы можете предложить свою тему:", reply_markup=back_kb)
         return
 
     user_chosen = get_user_topic_in_list(list_id, callback.from_user.id)
@@ -493,7 +845,7 @@ async def cb_change_page(callback: CallbackQuery):
     kb = build_topics_page_keyboard(list_id, topics, callback.from_user.id, page=page)
     await callback.message.edit_text(header_text, parse_mode="HTML", reply_markup=kb)
 
-# --- ПОИСК ТЕМЫ ---
+# Поиск темы
 @router.callback_query(F.data.startswith("search_topic_"))
 async def cb_search_topic(callback: CallbackQuery, state: FSMContext):
     list_id = int(callback.data.split("_")[2])
@@ -529,7 +881,7 @@ async def process_search_query(message: Message, state: FSMContext):
         reply_markup=kb
     )
 
-# --- ПРЕДЛОЖИТЬ СВОЮ ТЕМУ ---
+# Добавление темы студентом («Другое»)
 @router.callback_query(F.data.startswith("custom_topic_"))
 async def cb_custom_topic_start(callback: CallbackQuery, state: FSMContext):
     list_id = int(callback.data.split("_")[2])
@@ -542,7 +894,9 @@ async def cb_custom_topic_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(StudentStates.waiting_for_custom_topic)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Отмена", callback_data=f"open_list_{list_id}_0")]])
     await callback.message.edit_text(
-        "💡 <b>Предложить свою тему</b>\n\nНапишите точное название темы в чат.\nОна появится в списке и закрепится за вами как занятая.",
+        "💡 <b>Предложить свою тему («Другое»)</b>\n\n"
+        "Напишите точное название вашей темы сообщением в чат.\n"
+        "Она сразу появится в общем списке предмета и автоматически закрепится за вами!",
         parse_mode="HTML",
         reply_markup=kb
     )
@@ -551,7 +905,7 @@ async def cb_custom_topic_start(callback: CallbackQuery, state: FSMContext):
 async def process_custom_topic_text(message: Message, state: FSMContext):
     topic_title = message.text.strip()
     if not topic_title:
-        await message.answer("Пожалуйста, введите непустое название темы.")
+        await message.answer("Пожалуйста, отправьте непустой текст темы.")
         return
 
     data = await state.get_data()
@@ -563,41 +917,35 @@ async def process_custom_topic_text(message: Message, state: FSMContext):
         await message.answer("Вы уже записаны на тему в этом предмете.")
         return
 
+    # Создаем тему в базе и сразу прикрепляем студента
     topic_id = create_topic(list_id, topic_title, max_members=1)
     name = message.from_user.full_name
     add_member(topic_id, message.from_user.id, name)
 
     await state.clear()
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 К списку тем", callback_data=f"open_list_{list_id}_0")],
+        [InlineKeyboardButton(text="📋 К каталогу тем", callback_data=f"open_list_{list_id}_0")],
         [InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu")]
     ])
     await message.answer(
-        f"✅ Ваша тема <b>«{topic_title}»</b> добавлена в список и закреплена за вами!",
+        f"✅ Ваша тема <b>«{topic_title}»</b> добавлена в каталог и забронирована за вами!",
         parse_mode="HTML",
         reply_markup=kb
     )
 
-# --- КАРТОЧКА ТЕМЫ И ЗАПИСЬ ---
+# Карточка темы
 @router.callback_query(F.data.startswith("topic_"))
 async def cb_topic_details(callback: CallbackQuery):
     parts = callback.data.split("_")
     topic_id = int(parts[1])
     page = int(parts[2]) if len(parts) > 2 else 0
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    p = query_placeholder()
-    cursor.execute(f"SELECT list_id, title, max_members FROM topics WHERE id = {p}", (topic_id,))
-    topic = cursor.fetchone()
-    cursor.close()
-    conn.close()
-
+    topic = get_topic_by_id(topic_id)
     if not topic:
         await callback.answer("Тема не найдена")
         return
 
-    list_id, title, max_m = topic
+    _, list_id, title, max_m = topic
     members = get_members(topic_id)
     cur_m = len(members)
 
@@ -616,11 +964,11 @@ async def cb_topic_details(callback: CallbackQuery):
     if is_user_in_this_topic:
         kb.append([InlineKeyboardButton(text="❌ Отказаться от темы", callback_data=f"leave_{topic_id}_{page}")])
     elif user_topic_in_list:
-        text += f"\n⚠️ <i>Вы уже записаны на «{user_topic_in_list[1]}». Можно выбрать только одну тему.</i>"
+        text += f"\n⚠️ <i>Вы уже записаны на тему «{user_topic_in_list[1]}». Можно выбрать только одну тему.</i>"
     elif cur_m < max_m:
         kb.append([InlineKeyboardButton(text="✅ Записаться на тему", callback_data=f"take_{topic_id}_{page}")])
 
-    kb.append([InlineKeyboardButton(text="◀️ Назад к списку тем", callback_data=f"open_list_{list_id}_{page}")])
+    kb.append([InlineKeyboardButton(text="◀️ Назад к списку", callback_data=f"open_list_{list_id}_{page}")])
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 @router.callback_query(F.data.startswith("take_"))
@@ -660,7 +1008,7 @@ async def cb_my_topics(callback: CallbackQuery):
 
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-# --- ВЫГРУЗКА БОЛЬШОГО EXCEL ---
+# --- ВЫГРУЗКА EXCEL ---
 @router.callback_query(F.data == "download_excel")
 async def cb_download_excel(callback: CallbackQuery):
     wb = Workbook()
@@ -701,7 +1049,7 @@ async def cb_download_excel(callback: CallbackQuery):
     await callback.message.answer_document(document=file, caption="📊 Актуальный реестр тем")
     await callback.answer()
 
-# --- ВЕБ-СЕРВЕР ДЛЯ PING ---
+# --- ВЕБ-СЕРВЕР PING ДЛЯ UPTIMEROBOT ---
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
 
@@ -713,7 +1061,7 @@ async def start_web_server():
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
 
-# --- СТАРТ ---
+# --- ТОЧКА ВХОДА ---
 async def main():
     init_db()
     await start_web_server()
